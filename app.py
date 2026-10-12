@@ -11,21 +11,63 @@ st.set_page_config(
     page_title="Measles & Rubella Multi-Lab File Merger", layout="wide"
 )
 
-LABS = [
-    "Aceh",
-    "Bandung",
-    "Banjarbaru",
-    "Banjarnegara",
-    "BBLKM Jakarta",
-    "BBLKM Yogyakarta",
-    "Binomika Jakarta",
-    "Jakarta",
-    "Labkesda Jakarta",
-    "Makassar",
-    "Palembang",
-    "Surabaya",
-    "Yogyakarta",
-]
+# Mapped directly from '06 Measles Lab -- CBMS Report Jun 2026 15072026.xls'
+LAB_MAPPING = {
+    "BBLBK Jakarta": {
+        "sheet_name": "BBLBK Jakarta",
+        "full_name": "National Health Biology Laboratory (BBLBK Jakarta)",
+    },
+    "Bio Farma Bandung": {
+        "sheet_name": "Bio Farma Bandung",
+        "full_name": "Bio Farma Bandung",
+    },
+    "Yogyakarta Provincial PHL": {
+        "sheet_name": "Yogyakarta Provincial PHL",
+        "full_name": "Yogyakarta Provincial Public Health Laboratory",
+    },
+    "Surabaya PHL": {
+        "sheet_name": "Surabaya PHL",
+        "full_name": "Surabaya Public Health Laboratory",
+    },
+    "Palembang PHL": {
+        "sheet_name": "Palembang PHL",
+        "full_name": "Palembang Public Health Laboratory",
+    },
+    "Makassar PHL": {
+        "sheet_name": "Makassar PHL",
+        "full_name": "BBLKM Makassar",
+    },
+    "Jakarta PHL": {
+        "sheet_name": "Jakarta PHL",
+        "full_name": "Jakarta Public Health Laboratory",
+    },
+    "Jakarta Provincial PHL": {
+        "sheet_name": "Jakarta Provincial PHL",
+        "full_name": "Jakarta Provincial Public Health Laboratory",
+    },
+    "BB Binomika": {
+        "sheet_name": "BB Binomika",
+        "full_name": "Center for Biomedic and Health Genomics",
+    },
+    "Banjarbaru PHL": {
+        "sheet_name": "Banjarbaru PHL",
+        "full_name": "BB LABKESMAS BANJARBARU",
+    },
+    "Banjarnegara PHL": {
+        "sheet_name": "Banjarnegara PHL",
+        "full_name": "Banjarnegara Public Health Laboratory",
+    },
+    "Yogyakarta PHL": {
+        "sheet_name": "Yogyakarta PHL",
+        "full_name": "Yogyakarta Public Health Laboratory",
+    },
+    "Aceh PHL": {
+        "sheet_name": "Aceh PHL",
+        "full_name": "Aceh Public Health Laboratory",
+    },
+}
+
+LABS = list(LAB_MAPPING.keys())
 
 MONTHS = [
     "January",
@@ -86,10 +128,8 @@ def detect_report_type_from_sheet(sheet_name, row0_val):
 def parse_uploaded_file_sheet(excel_file, sheet_name):
   """Parses a specific sheet from an Excel File into a 20-column DataFrame and extracts its date."""
   try:
-    # Read raw content for header inspection
     raw_df = pd.read_excel(excel_file, sheet_name=sheet_name, header=None)
 
-    # Extract report date from cell I3 (row index 2, col index 8)
     report_date = datetime.date.today()
     try:
       val = raw_df.iloc[2, 8]
@@ -98,17 +138,14 @@ def parse_uploaded_file_sheet(excel_file, sheet_name):
     except Exception:
       pass
 
-    # Extract monthly table rows (skip top headers)
     df_data = pd.read_excel(
         excel_file, sheet_name=sheet_name, skiprows=6, nrows=12
     )
 
-    # Align columns dynamically (handles source files with 14 vs 20 columns)
     num_cols = min(df_data.shape[1], len(COLUMNS))
     df_data = df_data.iloc[:12, :num_cols].copy()
     df_data.columns = COLUMNS[:num_cols]
 
-    # Fill any missing columns with 0
     for col in COLUMNS:
       if col not in df_data.columns:
         df_data[col] = 0
@@ -121,20 +158,22 @@ def parse_uploaded_file_sheet(excel_file, sheet_name):
 
 
 def parse_entire_uploaded_file(file_obj, fallback_type="CBMS"):
-  """Reads an uploaded file and returns a list of tuples: [(detected_type, df_data, report_date), ...]."""
+  """Reads an uploaded file and returns a list of tuples: [(detected_type, df_data, report_date, sheet_name), ...]."""
   results = []
   try:
     excel_file = pd.ExcelFile(file_obj)
     sheet_names = excel_file.sheet_names
 
     for sheet in sheet_names:
-      # Read row 0 to check header text
+      # Skip summary or system sheets if present
+      if sheet.upper() in ["TOTAL", "ESRI_MAPINFO_SHEET"]:
+        continue
+
       raw_df = pd.read_excel(excel_file, sheet_name=sheet, header=None, nrows=1)
       row0_val = raw_df.iloc[0, 0] if not raw_df.empty else ""
 
       detected_type = detect_report_type_from_sheet(sheet, row0_val)
 
-      # If there is only 1 sheet in the workbook and auto-detection is neutral, use UI fallback choice
       if len(sheet_names) == 1 and "cbms" not in str(sheet).lower():
         detected_type = fallback_type
 
@@ -148,7 +187,7 @@ def parse_entire_uploaded_file(file_obj, fallback_type="CBMS"):
 
 
 def build_master_workbook(data_dict, date_dict, report_title_type="CBMS"):
-  """Creates formatted openpyxl workbook containing separate sheets for each lab."""
+  """Creates formatted openpyxl workbook containing separate sheets with mapped names for each lab."""
   wb = openpyxl.Workbook()
   wb.remove(wb.active)
 
@@ -160,8 +199,11 @@ def build_master_workbook(data_dict, date_dict, report_title_type="CBMS"):
       start_color="F2F2F2", end_color="F2F2F2", fill_type="solid"
   )
 
-  for lab_name in LABS:
-    ws = wb.create_sheet(title=lab_name)
+  for lab_key in LABS:
+    sheet_title = LAB_MAPPING[lab_key]["sheet_name"]
+    full_lab_name = LAB_MAPPING[lab_key]["full_name"]
+
+    ws = wb.create_sheet(title=sheet_title)
     ws.views.sheetView[0].showGridLines = True
 
     # 1. Header Title (Row 1)
@@ -178,7 +220,7 @@ def build_master_workbook(data_dict, date_dict, report_title_type="CBMS"):
     ws["A3"].font = Font(bold=True)
 
     ws.merge_cells("B3:G3")
-    ws["B3"] = f"BB LABKESMAS {lab_name.upper()}"
+    ws["B3"] = full_lab_name
     ws["B3"].font = Font(bold=True, italic=True)
     ws["B3"].border = Border(left=thick, right=thick, top=thick, bottom=thick)
 
@@ -186,7 +228,7 @@ def build_master_workbook(data_dict, date_dict, report_title_type="CBMS"):
     ws["I3"].font = Font(bold=True)
 
     ws.merge_cells("K3:M3")
-    report_date = date_dict.get(lab_name, datetime.date.today())
+    report_date = date_dict.get(lab_key, datetime.date.today())
     ws["K3"] = report_date.strftime("%d-%b-%Y")
     ws["K3"].alignment = Alignment(horizontal="center")
     ws["K3"].border = Border(left=thick, right=thick, top=thick, bottom=thick)
@@ -279,7 +321,7 @@ def build_master_workbook(data_dict, date_dict, report_title_type="CBMS"):
       cell.border = border_box
 
     # 5. Data Rows (Rows 8 to 19)
-    df = data_dict.get(lab_name, get_empty_df())
+    df = data_dict.get(lab_key, get_empty_df())
 
     for i, row in df.iterrows():
       row_num = 8 + i
@@ -376,7 +418,6 @@ for slot in range(1, 16):
       )
 
       for dtype, df_data, p_date, sheet_name in parsed_results:
-        # Use explicit date picked in UI if available, else parsed date
         final_date = report_date if report_date else p_date
 
         if dtype == "CBMS":
