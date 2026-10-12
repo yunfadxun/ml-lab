@@ -8,7 +8,7 @@ import streamlit as st
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="SEAR Measles & Rubella Multi-Lab File Merger", layout="wide"
+    page_title="Measles & Rubella Multi-Lab File Merger", layout="wide"
 )
 
 LABS = [
@@ -90,7 +90,6 @@ def parse_uploaded_file(file_obj):
       pass
 
     # Extract monthly data (Rows starting from Row 8 / index 7 or Row 7 / index 6)
-    # Check if header offset matches template
     df_data = pd.read_excel(file_obj, skiprows=6, nrows=12)
     df_data = df_data.iloc[:12, : len(COLUMNS)]
     df_data.columns = COLUMNS
@@ -117,7 +116,7 @@ def build_master_workbook(data_dict, date_dict, report_title_type="CBMS"):
     ws = wb.create_sheet(title=lab_name)
     ws.views.sheetView[0].showGridLines = True
 
-    # 1. Header Title (Row 1)
+    # 1. Header Title (Row 1) - Standardized layout font
     ws.merge_cells("A1:U1")
     ws["A1"] = (
         f"SEAR - Measles Laboratory Network - Monthly Reporting"
@@ -241,4 +240,128 @@ def build_master_workbook(data_dict, date_dict, report_title_type="CBMS"):
           horizontal="center"
       )
 
-      for c
+      for c_idx, col_name in enumerate(COLUMNS[1:], start=2):
+        val = row[col_name]
+        cell = ws.cell(
+            row=row_num, column=c_idx, value=int(val) if pd.notna(val) else 0
+        )
+        cell.alignment = Alignment(horizontal="center")
+
+      for c_idx in range(1, 21):
+        ws.cell(row=row_num, column=c_idx).border = border_box
+
+    # 6. Total Formula Row (Row 20)
+    ws.cell(row=20, column=1, value="Total").font = Font(bold=True)
+    ws.cell(row=20, column=1).alignment = Alignment(horizontal="center")
+    ws.cell(row=20, column=1).border = border_box
+
+    for c_idx in range(2, 21):
+      col_letter = get_column_letter(c_idx)
+      cell = ws.cell(
+          row=20, column=c_idx, value=f"=SUM({col_letter}8:{col_letter}19)"
+      )
+      cell.font = Font(bold=True)
+      cell.alignment = Alignment(horizontal="center")
+      cell.border = border_box
+
+  output = io.BytesIO()
+  wb.save(output)
+  return output.getvalue()
+
+
+# --- STREAMLIT APP INTERFACE ---
+# Subtle, regular-weight heading with low visual prominence
+st.markdown(
+    "<h2 style='font-weight: normal; font-size: 22px; color: #2C3E50;'>Measles &"
+    " Rubella Multi-Lab Report Merger</h2>",
+    unsafe_allow_html=True,
+)
+st.caption(
+    "Upload files below to combine laboratory reports into formatted master"
+    " sheets."
+)
+
+cbms_data_dict = {lab: get_empty_df() for lab in LABS}
+cbms_date_dict = {lab: datetime.date.today() for lab in LABS}
+
+ob_data_dict = {lab: get_empty_df() for lab in LABS}
+ob_date_dict = {lab: datetime.date.today() for lab in LABS}
+
+# --- 15 UPLOAD SLOTS INTERFACE ---
+st.markdown("### Upload Files & Configure Metadata")
+
+for slot in range(1, 16):
+  with st.expander(f"Slot {slot}: Upload & Configure File", expanded=(slot == 1)):
+    col1, col2, col3, col4 = st.columns([2, 1.5, 2, 2])
+
+    with col1:
+      file_obj = st.file_uploader(
+          f"Upload File #{slot}", type=["xls", "xlsx"], key=f"file_{slot}"
+      )
+
+    with col2:
+      report_type = st.radio(
+          f"Type #{slot}",
+          options=["CBMS", "OB (Outbreak)"],
+          key=f"type_{slot}",
+      )
+
+    with col3:
+      default_lab_idx = (slot - 1) % len(LABS)
+      lab_site = st.selectbox(
+          f"Lab Site #{slot}",
+          options=LABS,
+          index=default_lab_idx,
+          key=f"lab_{slot}",
+      )
+
+    with col4:
+      report_date = st.date_input(
+          f"Report Date #{slot}",
+          value=datetime.date.today(),
+          key=f"date_{slot}",
+      )
+
+    # Process file if uploaded
+    if file_obj is not None:
+      df_data, parsed_date = parse_uploaded_file(file_obj)
+
+      if "CBMS" in report_type:
+        cbms_data_dict[lab_site] = df_data
+        cbms_date_dict[lab_site] = report_date
+      else:
+        ob_data_dict[lab_site] = df_data
+        ob_date_dict[lab_site] = report_date
+
+      st.info(f"Slot {slot}: Parsed data for {lab_site} ({report_type})")
+
+st.divider()
+
+# --- MERGE & DOWNLOAD SECTION ---
+st.markdown("### Generate & Download Master Excel Files")
+
+col_left, col_right = st.columns(2)
+
+with col_left:
+  st.markdown("#### Master CBMS File")
+  cbms_bytes = build_master_workbook(
+      cbms_data_dict, cbms_date_dict, report_title_type="CBMS"
+  )
+  st.download_button(
+      label="Download Master CBMS File",
+      data=cbms_bytes,
+      file_name="master_cbms.xlsx",
+      mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  )
+
+with col_right:
+  st.markdown("#### Master OB (Outbreak) File")
+  ob_bytes = build_master_workbook(
+      ob_data_dict, ob_date_dict, report_title_type="Outbreak"
+  )
+  st.download_button(
+      label="Download Master OB File",
+      data=ob_bytes,
+      file_name="master_ob.xlsx",
+      mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  )
