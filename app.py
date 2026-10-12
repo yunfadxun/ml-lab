@@ -5,11 +5,10 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 import pandas as pd
 import streamlit as st
-from github import Github
 
-# --- PAGE SETUP & CONSTANTS ---
+# --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="SEAR Measles & Rubella Monthly Reporting", layout="wide"
+    page_title="SEAR Measles & Rubella Multi-Lab File Merger", layout="wide"
 )
 
 LABS = [
@@ -68,7 +67,7 @@ COLUMNS = [
 
 
 def get_empty_df():
-  """Creates a default template dataframe with 12 months initialized to 0."""
+  """Generates a default empty template dataframe."""
   df = pd.DataFrame(columns=COLUMNS)
   df["Month"] = MONTHS
   for col in COLUMNS[1:]:
@@ -76,66 +75,35 @@ def get_empty_df():
   return df
 
 
-# --- GITHUB UTILITIES ---
-def get_github_repo():
+def parse_uploaded_file(file_obj):
+  """Extracts report date and 12-month data table from an uploaded Excel file."""
   try:
-    token = st.secrets["GITHUB_TOKEN"]
-    repo_name = st.secrets["GITHUB_REPO"]  # Format: "owner/repo"
-    g = Github(token)
-    return g.get_repo(repo_name)
+    raw_df = pd.read_excel(file_obj, header=None)
+
+    # Extract report date from cell I3 (row index 2, col index 8)
+    report_date = datetime.date.today()
+    try:
+      val = raw_df.iloc[2, 8]
+      if pd.notna(val):
+        report_date = pd.to_datetime(val).date()
+    except Exception:
+      pass
+
+    # Extract monthly data (Rows starting from Row 8 / index 7 or Row 7 / index 6)
+    # Check if header offset matches template
+    df_data = pd.read_excel(file_obj, skiprows=6, nrows=12)
+    df_data = df_data.iloc[:12, : len(COLUMNS)]
+    df_data.columns = COLUMNS
+    return df_data, report_date
   except Exception as e:
-    st.error(f"GitHub Auth Error: {e}")
-    return None
+    st.error(f"Error reading file {file_obj.name}: {e}")
+    return get_empty_df(), datetime.date.today()
 
 
-def load_master_excel(file_name, repo):
-  """Loads master workbook data (rows starting from row 7/8)."""
-  try:
-    file_content = repo.get_contents(file_name)
-    excel_file = pd.ExcelFile(io.BytesIO(file_content.decoded_content))
-
-    data_dict = {}
-    date_dict = {}
-
-    for sheet in excel_file.sheet_names:
-      # Read full raw sheet to extract date header and table rows
-      raw_df = pd.read_excel(excel_file, sheet_name=sheet, header=None)
-
-      # Extract Date of Report from Cell I3 (row index 2, col index 8) if present
-      report_date = None
-      try:
-        val = raw_df.iloc[2, 8]
-        report_date = (
-            pd.to_datetime(val).date() if pd.notna(val) else datetime.date.today()
-        )
-      except Exception:
-        report_date = datetime.date.today()
-      date_dict[sheet] = report_date
-
-      # Extract monthly data table (Rows starting from Row 7 index 6)
-      df_data = pd.read_excel(
-          excel_file, sheet_name=sheet, skiprows=6, nrows=12
-      )
-      # Drop formula total row if present
-      df_data = df_data.iloc[:12, : len(COLUMNS)]
-      df_data.columns = COLUMNS
-      data_dict[sheet] = df_data
-
-    return data_dict, date_dict, file_content.sha
-  except Exception:
-    # If file doesn't exist yet, return initial defaults
-    default_data = {lab: get_empty_df() for lab in LABS}
-    default_dates = {lab: datetime.date.today() for lab in LABS}
-    return default_data, default_dates, None
-
-
-def generate_exact_formatted_workbook(
-    data_dict, date_dict, report_title_type="CBMS"
-):
-  """Generates an openpyxl Workbook matching the WHO SEARO template layout."""
+def build_master_workbook(data_dict, date_dict, report_title_type="CBMS"):
+  """Creates formatted workbook containing separate sheets for each lab."""
   wb = openpyxl.Workbook()
-  # Remove default sheet
-  wb.remove(wb.active)
+  wb.remove(wb.active)  # Remove default active sheet
 
   thin = Side(border_style="thin", color="000000")
   thick = Side(border_style="medium", color="000000")
@@ -150,12 +118,11 @@ def generate_exact_formatted_workbook(
     ws.views.sheetView[0].showGridLines = True
 
     # 1. Header Title (Row 1)
-    title_str = (
+    ws.merge_cells("A1:U1")
+    ws["A1"] = (
         f"SEAR - Measles Laboratory Network - Monthly Reporting"
         f" ({report_title_type})"
     )
-    ws.merge_cells("A1:U1")
-    ws["A1"] = title_str
     ws["A1"].font = Font(name="Calibri", size=11, bold=True)
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
 
@@ -166,9 +133,7 @@ def generate_exact_formatted_workbook(
     ws.merge_cells("B3:G3")
     ws["B3"] = f"BB LABKESMAS {lab_name.upper()}"
     ws["B3"].font = Font(bold=True, italic=True)
-    ws["B3"].border = Border(
-        left=thick, right=thick, top=thick, bottom=thick
-    )  # Bordered text box
+    ws["B3"].border = Border(left=thick, right=thick, top=thick, bottom=thick)
 
     ws["I3"] = "Date of Report:"
     ws["I3"].font = Font(bold=True)
@@ -177,11 +142,9 @@ def generate_exact_formatted_workbook(
     report_date = date_dict.get(lab_name, datetime.date.today())
     ws["K3"] = report_date.strftime("%d-%b-%Y")
     ws["K3"].alignment = Alignment(horizontal="center")
-    ws["K3"].border = Border(
-        left=thick, right=thick, top=thick, bottom=thick
-    )  # Bordered date box
+    ws["K3"].border = Border(left=thick, right=thick, top=thick, bottom=thick)
 
-    # 3. Column Headers (Row 5 - 6)
+    # 3. Merged Column Headers (Rows 5–6)
     headers_map = [
         ("A5:A6", "Month"),
         ("B5:B6", "Number of Serum\nSamples Received"),
@@ -228,12 +191,12 @@ def generate_exact_formatted_workbook(
       )
       cell.fill = header_fill
 
-    # Apply borders across headers
+    # Apply header borders
     for r in range(5, 7):
       for c in range(1, 21):
         ws.cell(row=r, column=c).border = border_box
 
-    # 4. Column Numbers (Row 7)
+    # 4. Column Numbering (Row 7)
     col_numbers = [
         1,
         2,
@@ -257,14 +220,19 @@ def generate_exact_formatted_workbook(
         21,
     ]
     for c_idx, num in enumerate(col_numbers, start=1):
-      cell = ws.cell(row=7, column=c_idx, value=f"Column: {num}" if c_idx==1 else num)
+      cell = ws.cell(
+          row=7, column=c_idx, value=f"Column: {num}" if c_idx == 1 else num
+      )
       cell.font = Font(
-          name="Calibri", size=9, italic=True, color="FF0000" if c_idx==1 else "000000"
+          name="Calibri",
+          size=9,
+          italic=True,
+          color="FF0000" if c_idx == 1 else "000000",
       )
       cell.alignment = Alignment(horizontal="center", vertical="center")
       cell.border = border_box
 
-    # 5. Populate Monthly Data Rows (Rows 8 to 19)
+    # 5. Data Rows (Rows 8 to 19)
     df = data_dict.get(lab_name, get_empty_df())
 
     for i, row in df.iterrows():
@@ -273,107 +241,4 @@ def generate_exact_formatted_workbook(
           horizontal="center"
       )
 
-      for c_idx, col_name in enumerate(COLUMNS[1:], start=2):
-        val = row[col_name]
-        cell = ws.cell(
-            row=row_num, column=c_idx, value=int(val) if pd.notna(val) else 0
-        )
-        cell.alignment = Alignment(horizontal="center")
-
-      # Add borders
-      for c_idx in range(1, 21):
-        ws.cell(row=row_num, column=c_idx).border = border_box
-
-    # 6. Total Row (Row 20) with Formulas
-    ws.cell(row=20, column=1, value="Total").font = Font(bold=True)
-    ws.cell(row=20, column=1).alignment = Alignment(horizontal="center")
-    ws.cell(row=20, column=1).border = border_box
-
-    for c_idx in range(2, 21):
-      col_letter = get_column_letter(c_idx)
-      cell = ws.cell(row=20, column=c_idx, value=f"=SUM({col_letter}8:{col_letter}19)")
-      cell.font = Font(bold=True)
-      cell.alignment = Alignment(horizontal="center")
-      cell.border = border_box
-
-  output = io.BytesIO()
-  wb.save(output)
-  return output.getvalue()
-
-
-# --- APP INTERFACE ---
-st.title("🔬 SEAR Measles & Rubella Monthly Report Manager")
-
-repo = get_github_repo()
-
-# Step 1: Report Type
-report_type = st.radio(
-    "1. Select Report Type:",
-    options=["CBMS (Case-Based Measles Surveillance)", "OB (Outbreak)"],
-    horizontal=True,
-)
-
-file_name = "master_cbms.xlsx" if "CBMS" in report_type else "master_ob.xlsx"
-title_code = "CBMS" if "CBMS" in report_type else "Outbreak"
-
-# Step 2: Choose Laboratory Site
-selected_lab = st.selectbox("2. Select Laboratory / Site:", options=LABS)
-
-if repo:
-  data_dict, date_dict, sha = load_master_excel(file_name, repo)
-
-  # Step 3: Date Picker for "Date of Report"
-  current_date = date_dict.get(selected_lab, datetime.date.today())
-  selected_date = st.date_input(
-      f"3. Select Date of Report for {selected_lab}:", value=current_date
-  )
-
-  # Step 4: Data Entry Table
-  st.subheader(
-      f"4. Input Data starting at Row 8 (Jan–Dec) for **{selected_lab}**"
-  )
-
-  lab_df = data_dict.get(selected_lab, get_empty_df())
-
-  # Interactive table editor
-  edited_df = st.data_editor(
-      lab_df, num_rows="fixed", use_container_width=True, hide_index=True
-  )
-
-  # Save Button
-  if st.button("💾 Save & Commit to GitHub Master File", type="primary"):
-    data_dict[selected_lab] = edited_df
-    date_dict[selected_lab] = selected_date
-
-    with st.spinner("Generating formatted master Excel file and saving to GitHub..."):
-      excel_bytes = generate_exact_formatted_workbook(
-          data_dict, date_dict, report_title_type=title_code
-      )
-
-      commit_msg = (
-          f"Update {selected_lab} ({title_code}) report date {selected_date}"
-      )
-      if sha:
-        repo.update_file(file_name, commit_msg, excel_bytes, sha)
-      else:
-        repo.create_file(file_name, commit_msg, excel_bytes)
-
-    st.success(
-        f"Successfully updated sheet **'{selected_lab}'** with header date"
-        f" **{selected_date.strftime('%d-%b-%Y')}** in **{file_name}**!"
-    )
-
-  st.divider()
-
-  # Download Current Master File Button
-  st.subheader("📥 Export Master File")
-  export_bytes = generate_exact_formatted_workbook(
-      data_dict, date_dict, report_title_type=title_code
-  )
-
-  st.download_button(
-      label=f"Download Master File ({file_name})",
-      data=export_bytes,
-      file_name=file_name,
-      mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  )
+      for c
