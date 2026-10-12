@@ -76,9 +76,39 @@ def get_empty_df():
 
 
 def parse_uploaded_file(file_obj):
-  """Extracts report date and 12-month data table from an uploaded Excel file."""
+  """Extracts report date and 12-month data table from an uploaded Excel file, with fallbacks for legacy .xls engine support."""
   try:
-    raw_df = pd.read_excel(file_obj, header=None)
+    file_name = getattr(file_obj, "name", "").lower()
+
+    # Read full raw sheet for date header extraction
+    raw_df = None
+    df_data = None
+
+    if file_name.endswith(".xls"):
+      # Try xlrd engine first for legacy .xls files
+      try:
+        raw_df = pd.read_excel(file_obj, header=None, engine="xlrd")
+        file_obj.seek(0)
+        df_data = pd.read_excel(file_obj, skiprows=6, nrows=12, engine="xlrd")
+      except Exception:
+        # Fallback to calamine if xlrd is missing or fails
+        try:
+          file_obj.seek(0)
+          raw_df = pd.read_excel(file_obj, header=None, engine="calamine")
+          file_obj.seek(0)
+          df_data = pd.read_excel(
+              file_obj, skiprows=6, nrows=12, engine="calamine"
+          )
+        except Exception:
+          # Standard openpyxl fallback
+          file_obj.seek(0)
+          raw_df = pd.read_excel(file_obj, header=None)
+          file_obj.seek(0)
+          df_data = pd.read_excel(file_obj, skiprows=6, nrows=12)
+    else:
+      raw_df = pd.read_excel(file_obj, header=None)
+      file_obj.seek(0)
+      df_data = pd.read_excel(file_obj, skiprows=6, nrows=12)
 
     # Extract report date from cell I3 (row index 2, col index 8)
     report_date = datetime.date.today()
@@ -89,18 +119,17 @@ def parse_uploaded_file(file_obj):
     except Exception:
       pass
 
-    # Extract monthly data (Rows starting from Row 8 / index 7 or Row 7 / index 6)
-    df_data = pd.read_excel(file_obj, skiprows=6, nrows=12)
+    # Standardize extracted columns
     df_data = df_data.iloc[:12, : len(COLUMNS)]
     df_data.columns = COLUMNS
     return df_data, report_date
   except Exception as e:
-    st.error(f"Error reading file {file_obj.name}: {e}")
+    st.error(f"Error reading file {getattr(file_obj, 'name', '')}: {e}")
     return get_empty_df(), datetime.date.today()
 
 
 def build_master_workbook(data_dict, date_dict, report_title_type="CBMS"):
-  """Creates formatted workbook containing separate sheets for each lab."""
+  """Creates formatted openpyxl workbook containing separate sheets for each lab."""
   wb = openpyxl.Workbook()
   wb.remove(wb.active)  # Remove default active sheet
 
@@ -116,7 +145,7 @@ def build_master_workbook(data_dict, date_dict, report_title_type="CBMS"):
     ws = wb.create_sheet(title=lab_name)
     ws.views.sheetView[0].showGridLines = True
 
-    # 1. Header Title (Row 1) - Standardized layout font
+    # 1. Header Title (Row 1)
     ws.merge_cells("A1:U1")
     ws["A1"] = (
         f"SEAR - Measles Laboratory Network - Monthly Reporting"
@@ -270,7 +299,6 @@ def build_master_workbook(data_dict, date_dict, report_title_type="CBMS"):
 
 
 # --- STREAMLIT APP INTERFACE ---
-# Subtle, regular-weight heading with low visual prominence
 st.markdown(
     "<h2 style='font-weight: normal; font-size: 22px; color: #2C3E50;'>Measles &"
     " Rubella Multi-Lab Report Merger</h2>",
