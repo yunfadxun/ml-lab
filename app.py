@@ -75,40 +75,19 @@ def get_empty_df():
   return df
 
 
-def parse_uploaded_file(file_obj):
-  """Extracts report date and 12-month data table from an uploaded Excel file, with fallbacks for legacy .xls engine support."""
+def detect_report_type_from_sheet(sheet_name, row0_val):
+  """Detects whether a sheet contains CBMS or OB (Outbreak) data based on sheet name or row 0 header string."""
+  str_check = f"{str(sheet_name)} {str(row0_val)}".lower()
+  if "outbreak" in str_check or " ob" in str_check or "_ob" in str_check:
+    return "OB"
+  return "CBMS"
+
+
+def parse_uploaded_file_sheet(excel_file, sheet_name):
+  """Parses a specific sheet from an Excel File into a 20-column DataFrame and extracts its date."""
   try:
-    file_name = getattr(file_obj, "name", "").lower()
-
-    # Read full raw sheet for date header extraction
-    raw_df = None
-    df_data = None
-
-    if file_name.endswith(".xls"):
-      # Try xlrd engine first for legacy .xls files
-      try:
-        raw_df = pd.read_excel(file_obj, header=None, engine="xlrd")
-        file_obj.seek(0)
-        df_data = pd.read_excel(file_obj, skiprows=6, nrows=12, engine="xlrd")
-      except Exception:
-        # Fallback to calamine if xlrd is missing or fails
-        try:
-          file_obj.seek(0)
-          raw_df = pd.read_excel(file_obj, header=None, engine="calamine")
-          file_obj.seek(0)
-          df_data = pd.read_excel(
-              file_obj, skiprows=6, nrows=12, engine="calamine"
-          )
-        except Exception:
-          # Standard openpyxl fallback
-          file_obj.seek(0)
-          raw_df = pd.read_excel(file_obj, header=None)
-          file_obj.seek(0)
-          df_data = pd.read_excel(file_obj, skiprows=6, nrows=12)
-    else:
-      raw_df = pd.read_excel(file_obj, header=None)
-      file_obj.seek(0)
-      df_data = pd.read_excel(file_obj, skiprows=6, nrows=12)
+    # Read raw content for header inspection
+    raw_df = pd.read_excel(excel_file, sheet_name=sheet_name, header=None)
 
     # Extract report date from cell I3 (row index 2, col index 8)
     report_date = datetime.date.today()
@@ -119,19 +98,59 @@ def parse_uploaded_file(file_obj):
     except Exception:
       pass
 
-    # Standardize extracted columns
-    df_data = df_data.iloc[:12, : len(COLUMNS)]
-    df_data.columns = COLUMNS
+    # Extract monthly table rows (skip top headers)
+    df_data = pd.read_excel(
+        excel_file, sheet_name=sheet_name, skiprows=6, nrows=12
+    )
+
+    # Align columns dynamically (handles source files with 14 vs 20 columns)
+    num_cols = min(df_data.shape[1], len(COLUMNS))
+    df_data = df_data.iloc[:12, :num_cols].copy()
+    df_data.columns = COLUMNS[:num_cols]
+
+    # Fill any missing columns with 0
+    for col in COLUMNS:
+      if col not in df_data.columns:
+        df_data[col] = 0
+
+    df_data = df_data[COLUMNS]
     return df_data, report_date
   except Exception as e:
-    st.error(f"Error reading file {getattr(file_obj, 'name', '')}: {e}")
+    st.error(f"Error reading sheet '{sheet_name}': {e}")
     return get_empty_df(), datetime.date.today()
+
+
+def parse_entire_uploaded_file(file_obj, fallback_type="CBMS"):
+  """Reads an uploaded file and returns a list of tuples: [(detected_type, df_data, report_date), ...]."""
+  results = []
+  try:
+    excel_file = pd.ExcelFile(file_obj)
+    sheet_names = excel_file.sheet_names
+
+    for sheet in sheet_names:
+      # Read row 0 to check header text
+      raw_df = pd.read_excel(excel_file, sheet_name=sheet, header=None, nrows=1)
+      row0_val = raw_df.iloc[0, 0] if not raw_df.empty else ""
+
+      detected_type = detect_report_type_from_sheet(sheet, row0_val)
+
+      # If there is only 1 sheet in the workbook and auto-detection is neutral, use UI fallback choice
+      if len(sheet_names) == 1 and "cbms" not in str(sheet).lower():
+        detected_type = fallback_type
+
+      df_data, report_date = parse_uploaded_file_sheet(excel_file, sheet)
+      results.append((detected_type, df_data, report_date, sheet))
+
+  except Exception as e:
+    st.error(f"Error reading file {getattr(file_obj, 'name', '')}: {e}")
+
+  return results
 
 
 def build_master_workbook(data_dict, date_dict, report_title_type="CBMS"):
   """Creates formatted openpyxl workbook containing separate sheets for each lab."""
   wb = openpyxl.Workbook()
-  wb.remove(wb.active)  # Remove default active sheet
+  wb.remove(wb.active)
 
   thin = Side(border_style="thin", color="000000")
   thick = Side(border_style="medium", color="000000")
@@ -219,7 +238,6 @@ def build_master_workbook(data_dict, date_dict, report_title_type="CBMS"):
       )
       cell.fill = header_fill
 
-    # Apply header borders
     for r in range(5, 7):
       for c in range(1, 21):
         ws.cell(row=r, column=c).border = border_box
@@ -330,7 +348,7 @@ for slot in range(1, 16):
     with col2:
       report_type = st.radio(
           f"Type #{slot}",
-          options=["CBMS", "OB (Outbreak)"],
+          options=["Auto Detect / CBMS", "OB (Outbreak)"],
           key=f"type_{slot}",
       )
 
@@ -352,16 +370,28 @@ for slot in range(1, 16):
 
     # Process file if uploaded
     if file_obj is not None:
-      df_data, parsed_date = parse_uploaded_file(file_obj)
+      fallback = "OB" if "OB" in report_type else "CBMS"
+      parsed_results = parse_entire_uploaded_file(
+          file_obj, fallback_type=fallback
+      )
 
-      if "CBMS" in report_type:
-        cbms_data_dict[lab_site] = df_data
-        cbms_date_dict[lab_site] = report_date
-      else:
-        ob_data_dict[lab_site] = df_data
-        ob_date_dict[lab_site] = report_date
+      for dtype, df_data, p_date, sheet_name in parsed_results:
+        # Use explicit date picked in UI if available, else parsed date
+        final_date = report_date if report_date else p_date
 
-      st.info(f"Slot {slot}: Parsed data for {lab_site} ({report_type})")
+        if dtype == "CBMS":
+          cbms_data_dict[lab_site] = df_data
+          cbms_date_dict[lab_site] = final_date
+          st.info(
+              f"Slot {slot} (Sheet '{sheet_name}'): Parsed as CBMS for {lab_site}"
+          )
+        else:
+          ob_data_dict[lab_site] = df_data
+          ob_date_dict[lab_site] = final_date
+          st.info(
+              f"Slot {slot} (Sheet '{sheet_name}'): Parsed as OB (Outbreak)"
+              f" for {lab_site}"
+          )
 
 st.divider()
 
