@@ -165,7 +165,6 @@ def parse_entire_uploaded_file(file_obj, fallback_type="CBMS"):
     sheet_names = excel_file.sheet_names
 
     for sheet in sheet_names:
-      # Skip summary or system sheets if present
       if sheet.upper() in ["TOTAL", "ESRI_MAPINFO_SHEET"]:
         continue
 
@@ -331,9 +330,17 @@ def build_master_workbook(data_dict, date_dict, report_title_type="CBMS"):
 
       for c_idx, col_name in enumerate(COLUMNS[1:], start=2):
         val = row[col_name]
-        cell = ws.cell(
-            row=row_num, column=c_idx, value=int(val) if pd.notna(val) else 0
-        )
+        # Safe numeric parsing handling floats, strings, spaces, and NAs
+        try:
+          clean_val = (
+              int(float(val))
+              if (pd.notna(val) and str(val).strip() != "")
+              else 0
+          )
+        except (ValueError, TypeError):
+          clean_val = 0
+
+        cell = ws.cell(row=row_num, column=c_idx, value=clean_val)
         cell.alignment = Alignment(horizontal="center")
 
       for c_idx in range(1, 21):
